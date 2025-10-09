@@ -45,6 +45,39 @@ def generate_rrc_filter(sps, num_taps, beta):
 
     return h_rrc
 
+# --- Gardner Timing Recovery ---
+def gardner_timing_recovery(signal, sps):
+    """Simple Gardner timing recovery."""
+    mu = 0.0  # fractional offset
+    out = []
+    i = 0
+    while i < len(signal) - sps:
+        idx = int(i + mu)
+        frac = mu - int(mu)
+        # linear interpolation
+        sym = (1-frac)*signal[idx] + frac*signal[idx+1]
+        out.append(sym)
+
+        # mid-symbol sample
+        mid = (1-frac)*signal[idx+sps//2] + frac*signal[idx+sps//2+1]
+
+        # Gardner error
+        err = np.real(np.conj(sym) * (mid - sym))
+
+        # update mu
+        mu += sps + 0.01 * err
+        i += int(mu)
+        mu -= int(mu)
+    return np.array(out)
+
+# --- Align and Calculate BER ---
+def align_and_ber(decoded, ref):
+    corr = np.correlate(2*decoded-1, 2*ref-1, mode="full")
+    shift = np.argmax(corr) - len(ref) + 1
+    aligned = decoded[max(0,shift):shift+len(ref)]
+    aligned = aligned[:len(ref)]
+    bit_errors = np.sum(aligned != ref[:len(aligned)])
+    return bit_errors / len(aligned), bit_errors, shift
 
 # --- Main Script ---
 
@@ -76,7 +109,6 @@ except Exception as e:
 
 # Extract parameters from meta
 sps = meta["sps"]
-timing_offset = meta["timing_offset"]
 clean_bits = np.array(meta["clean_bits"])
 
 # Step 1: Matched filter (IMPROVED using RRC)
@@ -85,8 +117,8 @@ beta = 0.35  # Standard roll-off factor
 matched_filter = generate_rrc_filter(sps, num_taps, beta)
 filtered = np.convolve(rx, matched_filter, mode='same')
 
-# Step 2: Symbol timing recovery
-sampled = filtered[timing_offset::sps]
+# Step 2: Symbol timing recovery (IMPROVED using Gardner)
+sampled = gardner_timing_recovery(filtered, sps)
 
 # Step 3: Carrier Phase Correction (IMPROVED using a PLL)
 corrected_sampled = np.zeros_like(sampled)
@@ -108,14 +140,11 @@ for i, s in enumerate(sampled):
 # Step 4: Hard decision BPSK demodulation (on the corrected symbols)
 decoded_bits = (np.real(corrected_sampled) > 0).astype(int)
 
-# Step 5: Trim bits to match the length of clean_bits
-decoded_bits = decoded_bits[:len(clean_bits)]
+# Step 5: Align and Calculate BER
+ber, bit_errors, shift = align_and_ber(decoded_bits, clean_bits)
+print(f"Final BER: {ber:.6f} ({bit_errors} errors out of {len(clean_bits)}, shift={shift})")
 
-# Step 6: Calculate BER
-bit_errors = np.sum(decoded_bits != clean_bits)
-ber = bit_errors / len(clean_bits)
-print(f"BER with improvements: {ber:.6f} ({bit_errors} errors out of {len(clean_bits)})")
 
-# Step 7: Save decoded bits
-np.save('improveddecodedbitssample000_10db.npy', decoded_bits)
-print("Decoded bits saved as 'improveddecodedbitssample000_10db.npy.npy'.")
+# Step 6: Save decoded bits
+np.save('finaldecodedbitssample000_10db.npy', decoded_bits)
+print("Decoded bits saved as 'finaldecodedbitssample000_10db.npy'.")
